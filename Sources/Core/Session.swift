@@ -348,6 +348,26 @@ public struct Session: Identifiable, Equatable, Sendable {
             label = "Skill"; detail = input["skill"]
         case "TodoWrite", "TaskCreate", "TaskUpdate":
             label = "Update tasks"; detail = nil
+        case "AskUserQuestion":
+            label = "Ask"; detail = nil
+        case "SendMessage":
+            label = "Message"; detail = short(input["to"])
+        case "ToolSearch":
+            label = "Load tools"; detail = nil
+        case "EnterPlanMode":
+            label = "Plan"; detail = nil
+        case "ExitPlanMode":
+            label = "Plan ready"; detail = nil
+        case "ListAgents":
+            label = "List sessions"; detail = nil
+        case "TaskOutput", "BashOutput":
+            label = "Check"; detail = nil
+        case "TaskStop", "KillShell":
+            label = "Stop"; detail = nil
+        case "ScheduleWakeup":
+            label = "Wait"; detail = short(input["reason"])
+        case "Monitor":
+            label = "Watch"; detail = short(input["description"])
         default:
             if tool.hasPrefix("mcp__") {
                 let parts = tool.split(separator: "_", omittingEmptySubsequences: true)

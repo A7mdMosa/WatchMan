@@ -19,6 +19,8 @@ struct LiveGlance: Codable, Hashable, Sendable {
     var sentPrompt: String?
     /// Nothing has worked or waited since then; the activity ends a while later.
     var quietSince: Date?
+    /// The Dynamic Island is turned off in Settings: its closed island stays plain.
+    var plainIsland: Bool?
 
     init(_ glance: Glance, sentFor: String? = nil, sentPrompt: String? = nil, quietSince: Date? = nil) {
         focus = glance.focus

@@ -209,14 +209,16 @@ struct WatchManLiveActivity: Widget {
                         .environment(\.colorScheme, .dark)
                 }
             } compactLeading: {
-                IslandLeading(state: context.state)
+                // Dynamic Island off in Settings: nothing in the closed island (a long press still opens it)
+                if context.state.plainIsland != true { IslandLeading(state: context.state) }
             } compactTrailing: {
-                IslandTrailing(state: context.state)
+                if context.state.plainIsland != true { IslandTrailing(state: context.state) }
             } minimal: {
-                IconFace(size: 20)
+                if context.state.plainIsland != true { IconFace(size: 20) }
             }
             .widgetURL(context.state.link)
-            .keylineTint(IconFace.indigo)
+            // Dynamic Island off: no coloured outline either
+            .keylineTint(context.state.plainIsland == true ? Color.clear : IconFace.indigo)
         }
     }
 }

@@ -14,7 +14,6 @@ final class MacReach {
     private(set) var askedAt: Date?
 
     func ping(_ store: PhoneStore) async {
-        guard !PhoneMode.isSample else { return }
         askedAt = Date()
         await store.ask(.ping)
     }
@@ -33,6 +32,12 @@ struct MacReachBanner: View {
     private var reach: MacReach { .shared }
 
     var body: some View {
+        VStack(spacing: 8) {
+            reachBanner
+        }
+    }
+
+    private var reachBanner: some View {
         TimelineView(.periodic(from: .now, by: 5)) { context in
             if reach.silent(store, now: context.date) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -60,80 +65,12 @@ struct MacReachBanner: View {
     }
 }
 
-// MARK: - Sample mode
-
-/// Sample sessions instead of the Mac's, for trying the app without a Mac (and for App Review).
-enum PhoneMode {
-    private static let key = "sampleMode"
-
-    static var isSample: Bool {
-        ProcessInfo.processInfo.arguments.contains("-sample") || UserDefaults.standard.bool(forKey: key)
-    }
-
-    static func set(sample: Bool) {
-        UserDefaults.standard.set(sample, forKey: key)
-        NotificationCenter.default.post(name: .watchManPhoneModeChanged, object: nil)
-    }
-
-    static func link() -> PhoneLink { isSample ? SampleLink() : CloudLink() }
-}
-
-extension Notification.Name {
-    /// Switched between sample sessions and the Mac's: the app makes a new store.
-    static let watchManPhoneModeChanged = Notification.Name("watchManPhoneModeChanged")
-}
-
-/// The sample's Mac: settings, projects, earlier chats and the rest, so every tab has something to show.
-enum PhoneSamples {
-    static func extras(now: Date = Date()) -> MacExtras {
-        let settings = MacSettings(approvalsEnabled: true, handBackSeconds: 90, awayHoldMinutes: 9, awayAfterMinutes: 5,
-                                   iphoneAlerts: true, iphoneAlertsWhenAway: true, autoContinue: true, notchMessages: true,
-                                   sounds: true, volume: 0.6, quietUntil: nil, quietWhilePresenting: true, stuckAlerts: true,
-                                   stuckIdleMinutes: 10, stuckRepeatCount: 3, stuckLongRunMinutes: 45, devLog: true,
-                                   devLogMinutes: 23 * 60, devLogHaiku: true,
-                                   quickReplies: ["continue", "yes, go ahead", "run the tests", "stop and summarize what you did"])
-        let day: TimeInterval = 24 * 3600
-        let projects = [
-            ProjectSnapshot(root: "/Users/you/Developer/Lumen", name: "Lumen", group: "Developer", muted: false,
-                            starters: ["/app-audit", "/code-review"], quickReplies: settings.quickReplies,
-                            todos: [ProjectTodo(text: "Add the leaderboard screen", due: now.addingTimeInterval(day)),
-                                    ProjectTodo(text: "Fix the timer on Android", due: nil)]),
-            ProjectSnapshot(root: "/Users/you/Developer/Trailmap", name: "Trailmap", group: "Developer", muted: false,
-                            starters: ["/app-audit"], quickReplies: settings.quickReplies,
-                            todos: [ProjectTodo(text: "Offline maps for saved routes", due: now.addingTimeInterval(3 * day))]),
-            ProjectSnapshot(root: "/Users/you/Developer/Harbor Web", name: "Harbor Web", group: "Developer", muted: true,
-                            starters: ["/code-review"], quickReplies: settings.quickReplies, todos: []),
-        ]
-        let recent = [
-            PastChat(id: "7a5ca5ab-393e-4701-816a-6b19054a27dd", title: "Add dark mode to the settings screen",
-                     folder: "/Users/you/Developer/Lumen", modified: now.addingTimeInterval(-3 * 3600)),
-            PastChat(id: "808dc785-0924-405d-aeb6-4ae9b0dabcfb", title: "Why does the route line flicker?",
-                     folder: "/Users/you/Developer/Trailmap", modified: now.addingTimeInterval(-day)),
-            PastChat(id: "3b74f5a1-919f-4eda-9b41-6cd44b5278d4", title: "Write the release notes for 2.1",
-                     folder: "/Users/you/Developer/Harbor Web", modified: now.addingTimeInterval(-2 * day)),
-        ]
-        let unsaved = [
-            UnsavedSnapshot(root: "/Users/you/Developer/Lumen", name: "Lumen", colorKey: "Lumen", branch: "main",
-                            changed: 4, ahead: 0, hasUpstream: true, canAsk: true),
-            UnsavedSnapshot(root: "/Users/you/Developer/Trailmap", name: "Trailmap", colorKey: "Trailmap", branch: "feature/routes",
-                            changed: 0, ahead: 2, hasUpstream: true, canAsk: true),
-        ]
-        let system = SystemSnapshot(memoryUsed: 11_400_000_000, memoryTotal: 17_179_869_184, pressure: 1,
-                                    sessions: [.init(name: "Lumen", megabytes: 412), .init(name: "Trailmap", megabytes: 386)],
-                                    leftovers: [.init(pid: 4242, kind: "Gradle daemon", megabytes: 1180)],
-                                    blockTokens: 23_000, blockEnds: now.addingTimeInterval(3 * 3600), weekTokens: 1_240_000,
-                                    budget: 0, at: now)
-        return MacExtras(settings: settings, projects: projects, recent: recent, unsaved: unsaved, system: system, answeredAt: now)
-    }
-}
-
 // MARK: - Photos in a reply
 
 extension PhoneStore {
     /// A reply with photos: the photos travel as files with the command, and the Mac puts their paths after your
     /// words, the way its own attachments go. Returns why it failed, or nil.
     func reply(_ text: String, photos: [Data], to sessionId: String) async -> String? {
-        guard !PhoneMode.isSample else { return nil }
         let command = PhoneCommand(sessionId: sessionId, kind: .reply(text))
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("WatchManPhotos", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -159,6 +96,11 @@ extension PhoneStore {
 enum PhonePhotos {
     static func jpeg(from item: PhotosPickerItem) async -> Data? {
         guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data) else { return nil }
+        return jpeg(image)
+    }
+
+    /// An image pasted from the clipboard (a screenshot, a copied photo), the same way.
+    static func jpeg(_ image: UIImage) -> Data? {
         let longest = max(image.size.width, image.size.height)
         let scale = min(1, 2048 / max(longest, 1))
         let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
@@ -241,7 +183,7 @@ struct EarlierMessagesButton: View {
 extension PhoneStore {
     func loadChatAsking(_ sessionId: String) async {
         await loadChat(sessionId)
-        guard chats[sessionId] == nil, !PhoneMode.isSample else { return }
+        guard chats[sessionId] == nil else { return }
         await send(.mac(.chat(limit: ChatSnapshot.maxItems)), to: sessionId)
         for wait in [2.0, 3.0, 5.0] {
             try? await Task.sleep(for: .seconds(wait))
@@ -299,7 +241,7 @@ struct ProjectChangesSection: View {
                 WaitingForMac(text: "Reading the changes…")
             }
         }
-        .task(id: session.id) { if !PhoneMode.isSample { await store.ask(.changes, session: session.id) } }
+        .task(id: session.id) { await store.ask(.changes, session: session.id) }
     }
 }
 

@@ -36,6 +36,13 @@ enum PhoneSettings {
         get { AppGroup.defaults.object(forKey: "liveActivity") as? Bool ?? true }
         set { AppGroup.defaults.set(newValue, forKey: "liveActivity") }
     }
+
+    /// The Live Activity's content in the Dynamic Island. Off, the island is left plain and only the lock screen
+    /// shows it (iOS puts a Live Activity in both places; an app can't leave the island out).
+    static var dynamicIsland: Bool {
+        get { AppGroup.defaults.object(forKey: "dynamicIsland") as? Bool ?? true }
+        set { AppGroup.defaults.set(newValue, forKey: "dynamicIsland") }
+    }
 }
 
 /// Where a widget or the Live Activity takes you: a session's page, or the app.

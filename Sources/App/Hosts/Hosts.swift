@@ -59,6 +59,24 @@ enum Hosts {
         }
     }
 
+    /// Why the last new tab couldn't be opened, in words for a message.
+    private(set) static var lastStartProblem: String?
+
+    /// Notes a new-tab script's outcome: logged, and kept in words when it failed.
+    static func opened(_ result: Script.Result, in app: String) -> Bool {
+        guard !result.ok else { lastStartProblem = nil; return true }
+        Log.info("couldn't open a tab in \(app): \(result.error)")
+        if result.error.contains("-1743") || result.error.localizedCaseInsensitiveContains("not authorized") {
+            lastStartProblem = "WatchMan isn't allowed to control \(app). Allow it in System Settings → Privacy & Security → Automation."
+        } else if result.error.contains("-600") || result.error.contains("-1728") {
+            lastStartProblem = "\(app) didn't respond. Open it and try again."
+        } else {
+            lastStartProblem = result.error.isEmpty ? "\(app) didn't open a tab." : "\(app): \(result.error)"
+        }
+        NotificationCenter.default.post(name: .watchManStartFailed, object: lastStartProblem)
+        return false
+    }
+
     /// Opens a new tab running `command` in `folder` (Ghostty by default).
     static func startSession(in folder: String, command: String, host: HostKind = .ghostty) async -> Bool {
         switch host {
@@ -166,7 +184,7 @@ enum GhosttyHost {
                 end tell
             end run
             """, [cwd, command])
-        return result.ok
+        return Hosts.opened(result, in: "Ghostty")
     }
 
     private static func terminalId(for tty: String, cwd: String) async -> String? {
@@ -305,7 +323,7 @@ enum ITermHost {
                 end tell
             end run
             """, [line])
-        return result.ok
+        return Hosts.opened(result, in: "a terminal")
     }
 }
 
@@ -373,7 +391,7 @@ enum TerminalAppHost {
                 end tell
             end run
             """, [line])
-        return result.ok
+        return Hosts.opened(result, in: "a terminal")
     }
 }
 

@@ -7,6 +7,8 @@ enum Script {
         var output: String
         /// Output exactly as printed (leading spaces matter, e.g. for git status).
         var raw: String = ""
+        /// What it printed on stderr, when asked for (AppleScript's error message).
+        var error: String = ""
         var ok: Bool { status == 0 }
     }
 
@@ -20,14 +22,15 @@ enum Script {
     }
 
     static func runBlocking(_ executable: String, _ arguments: [String], input: String? = nil,
-                            environment: [String: String]? = nil) -> Result {
+                            environment: [String: String]? = nil, capturesErrors: Bool = false) -> Result {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         if let environment { process.environment = environment }
         let out = Pipe()
         process.standardOutput = out
-        process.standardError = FileHandle.nullDevice
+        let errors = capturesErrors ? Pipe() : nil
+        process.standardError = errors ?? FileHandle.nullDevice
         let inPipe = input.map { _ in Pipe() }
         if let inPipe { process.standardInput = inPipe }
         do { try process.run() } catch { return Result(status: -1, output: "") }
@@ -36,15 +39,20 @@ enum Script {
             try? inPipe.fileHandleForWriting.close()
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errors?.fileHandleForReading.readDataToEndOfFile() ?? Data()
         process.waitUntilExit()
         let text = String(decoding: data, as: UTF8.self)
         return Result(status: process.terminationStatus, output: text.trimmingCharacters(in: .whitespacesAndNewlines),
-                      raw: text)
+                      raw: text, error: String(decoding: errorData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Runs AppleScript with its arguments passed as `argv` (never pasted into the source).
     static func appleScript(_ source: String, _ arguments: [String] = []) async -> Result {
-        await run("/usr/bin/osascript", ["-e", source] + arguments)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: runBlocking("/usr/bin/osascript", ["-e", source] + arguments, capturesErrors: true))
+            }
+        }
     }
 
     static func appleScriptBlocking(_ source: String, _ arguments: [String] = []) -> Result {

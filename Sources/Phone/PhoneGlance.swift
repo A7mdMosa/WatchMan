@@ -48,8 +48,9 @@ enum LiveActivity {
         for extra in live.dropFirst() { await extra.end(nil, dismissalPolicy: .immediate) }
         let current = live.first
         let previous = current?.content.state
-        let state = LiveGlance(glance, sentFor: previous?.sentFor, sentPrompt: previous?.sentPrompt,
+        var state = LiveGlance(glance, sentFor: previous?.sentFor, sentPrompt: previous?.sentPrompt,
                                quietSince: glance.busy ? nil : Date())
+        state.plainIsland = PhoneSettings.dynamicIsland ? nil : true
         let content = ActivityContent(state: state, staleDate: nil)
         if let current {
             if !glance.busy {

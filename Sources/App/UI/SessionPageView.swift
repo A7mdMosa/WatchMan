@@ -1012,7 +1012,10 @@ struct ChatMessageView: View {
     }
 
     var body: some View {
-        if message.fromYou {
+        if !message.questions.isEmpty {
+            QuestionChatCard(questions: message.questions, answers: message.answers, note: message.answerNote)
+                .padding(.top, 4)
+        } else if message.fromYou {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(">")
                     .font(.system(size: 12.5, weight: .bold, design: .monospaced))

@@ -8,47 +8,84 @@ import WatchManCore
 @MainActor
 final class CloudLink: PhoneLink {
     private var database: CKDatabase { CloudRecords.container.privateCloudDatabase }
-    /// Every record seen so far, and where the change feed left off, so each fetch reads only what changed.
+    /// Every record seen so far, and where the change feed left off, so each fetch reads only what changed. Kept on
+    /// disk too: the app opens on the last sessions it knew, then catches up.
     private var sessions: [String: SessionSnapshot] = [:]
     private var status: MacStatus?
     private var changeToken: CKServerChangeToken?
-    private var subscribed = false
+    /// The chats whose page was opened: the change feed brings their new messages; others load when asked.
+    private var followed: Set<String> = []
+    private var accountChecked = false
 
     enum LinkError: LocalizedError {
         case noAccount, notStarted
         var errorDescription: String? {
             switch self {
             case .noAccount: "Sign in to iCloud on this iPhone, with the same Apple ID as the Mac."
-            case .notStarted: "Open WatchMan on your Mac to link it."
+            case .notStarted: "Install WatchMan for Mac (free) and open it with the same Apple ID. Your Claude Code sessions show up here."
             }
         }
     }
 
+    init() {
+        if let cache = LinkCache.load() {
+            sessions = Dictionary(cache.sessions.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+            status = cache.status
+            changeToken = cache.token
+        }
+    }
+
+    func cachedState() -> PhoneState? {
+        guard !sessions.isEmpty || status != nil else { return nil }
+        return state(chats: [:])
+    }
+
     func fetch() async throws -> PhoneState {
-        guard try await CloudRecords.container.accountStatus() == .available else { throw LinkError.noAccount }
-        await subscribeIfNeeded()
+        if !accountChecked {
+            guard try await CloudRecords.container.accountStatus() == .available else { throw LinkError.noAccount }
+            accountChecked = true
+        }
+        // Subscribing doesn't hold up the sessions
+        Task { await subscribeIfNeeded() }
+        var chats: [String: ChatSnapshot] = [:]
         do {
+            // The feed without its fields first: only sessions, the status and opened chats are worth downloading
+            var wanted: [CKRecord.ID] = []
             var more = true
+            var token = changeToken
             while more {
-                let changes = try await database.recordZoneChanges(inZoneWith: CloudRecords.zoneID, since: changeToken)
-                for (_, result) in changes.modificationResultsByID {
+                let changes = try await database.recordZoneChanges(inZoneWith: CloudRecords.zoneID, since: token, desiredKeys: [])
+                for (id, result) in changes.modificationResultsByID {
                     guard case .success(let modification) = result else { continue }
-                    let record = modification.record
-                    switch record.recordType {
-                    case CloudRecords.Kind.session:
-                        if let snapshot = CloudRecords.value(SessionSnapshot.self, in: record) { sessions[snapshot.id] = snapshot }
-                    case CloudRecords.Kind.status:
-                        status = CloudRecords.value(MacStatus.self, in: record)
-                    default:
-                        break
+                    switch modification.record.recordType {
+                    case CloudRecords.Kind.session, CloudRecords.Kind.status: wanted.append(id)
+                    case CloudRecords.Kind.chat where followed.contains(String(id.recordName.dropFirst("chat-".count))):
+                        wanted.append(id)
+                    default: break
                     }
                 }
                 for deletion in changes.deletions where deletion.recordType == CloudRecords.Kind.session {
                     sessions[deletion.recordID.recordName] = nil
                 }
-                changeToken = changes.changeToken
+                token = changes.changeToken
                 more = changes.moreComing
             }
+            for batch in stride(from: 0, to: wanted.count, by: 200).map({ Array(wanted[$0..<min($0 + 200, wanted.count)]) }) {
+                for (_, result) in try await database.records(for: batch) {
+                    guard case .success(let record) = result else { continue }
+                    switch record.recordType {
+                    case CloudRecords.Kind.session:
+                        if let snapshot = CloudRecords.value(SessionSnapshot.self, in: record) { sessions[snapshot.id] = snapshot }
+                    case CloudRecords.Kind.status:
+                        status = CloudRecords.value(MacStatus.self, in: record)
+                    case CloudRecords.Kind.chat:
+                        if let chat = CloudRecords.value(ChatSnapshot.self, in: record) { chats[chat.sessionId] = chat }
+                    default: break
+                    }
+                }
+            }
+            changeToken = token
+            LinkCache(sessions: Array(sessions.values), status: status, token: changeToken).save()
         } catch let error as CKError where error.code == .zoneNotFound {
             throw LinkError.notStarted
         } catch let error as CKError where error.code == .changeTokenExpired {
@@ -56,11 +93,16 @@ final class CloudLink: PhoneLink {
             sessions = [:]
             return try await fetch()
         }
-        return PhoneState(sessions: Array(sessions.values), usage: status?.usage, macName: status?.macName ?? "your Mac",
-                          updated: status?.updated ?? .distantPast, extras: status?.extras)
+        return state(chats: chats)
+    }
+
+    private func state(chats: [String: ChatSnapshot]) -> PhoneState {
+        PhoneState(sessions: Array(sessions.values), usage: status?.usage, macName: status?.macName ?? "your Mac",
+                   updated: status?.updated ?? .distantPast, extras: status?.extras, chats: chats)
     }
 
     func chat(for sessionId: String) async throws -> ChatSnapshot? {
+        followed.insert(sessionId)
         do {
             let record = try await database.record(for: CloudRecords.id(CloudRecords.chatName(sessionId)))
             return CloudRecords.value(ChatSnapshot.self, in: record)
@@ -74,9 +116,18 @@ final class CloudLink: PhoneLink {
         _ = try await database.save(record)
     }
 
-    /// A silent push whenever the Mac changes a session or the usage, so the app refreshes by itself.
+    /// A silent push whenever the Mac changes a session or the usage, so the app refreshes by itself. Saved at most
+    /// once a day (and whenever what they ask for changes), since iCloud keeps them.
+    private static let subscriptionsVersion = 4
+    private var subscribing = false
+
     private func subscribeIfNeeded() async {
-        guard !subscribed else { return }
+        UIApplication.shared.registerForRemoteNotifications()
+        let defaults = UserDefaults.standard
+        let fresh = Date().timeIntervalSince1970 - defaults.double(forKey: "subscribedAt") < 24 * 3600
+        guard !subscribing, !(fresh && defaults.integer(forKey: "subscriptionsVersion") == Self.subscriptionsVersion) else { return }
+        subscribing = true
+        defer { subscribing = false }
         let info = CKSubscription.NotificationInfo()
         info.shouldSendContentAvailable = true
         var subscriptions: [CKSubscription] = []
@@ -111,9 +162,40 @@ final class CloudLink: PhoneLink {
             subscriptions.append(subscription)
         }
         if (try? await database.modifySubscriptions(saving: subscriptions, deleting: [])) != nil {
-            subscribed = true
-            UIApplication.shared.registerForRemoteNotifications()
+            defaults.set(Date().timeIntervalSince1970, forKey: "subscribedAt")
+            defaults.set(Self.subscriptionsVersion, forKey: "subscriptionsVersion")
         }
+    }
+}
+
+/// The sessions, the status and the change token from the last fetch, in Caches: the app opens on them at once.
+private struct LinkCache: Codable {
+    var sessions: [SessionSnapshot]
+    var status: MacStatus?
+    var tokenData: Data?
+
+    init(sessions: [SessionSnapshot], status: MacStatus?, token: CKServerChangeToken?) {
+        self.sessions = sessions
+        self.status = status
+        tokenData = token.flatMap { try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true) }
+    }
+
+    var token: CKServerChangeToken? {
+        tokenData.flatMap { try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: $0) }
+    }
+
+    private static var url: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("cloud-link.json")
+    }
+
+    static func load() -> LinkCache? {
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(LinkCache.self, from: data)
+    }
+
+    func save() {
+        guard let url = Self.url, let data = try? JSONEncoder().encode(self) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 }
 

@@ -4,12 +4,18 @@ import UIKit
 import WatchManCore
 
 /// How the phone talks to the Mac: what it reads (sessions, chats, usage) and what it sends (your answers).
-/// The iCloud link implements it; until then the sample link shows how it looks.
+/// The iCloud link implements it.
 @MainActor
 protocol PhoneLink {
     func fetch() async throws -> PhoneState
     func chat(for sessionId: String) async throws -> ChatSnapshot?
     func send(_ command: PhoneCommand) async throws
+    /// What the link knew last time, shown at once while it catches up.
+    func cachedState() -> PhoneState?
+}
+
+extension PhoneLink {
+    func cachedState() -> PhoneState? { nil }
 }
 
 /// Everything the Mac shares at once.
@@ -20,6 +26,8 @@ struct PhoneState: Equatable, Sendable {
     var updated: Date
     /// The Mac's settings and the lists the phone asked for (Settings, Resume, System, Not saved yet).
     var extras: MacExtras? = nil
+    /// Chats that changed since the last read (the store keeps them; this only carries them over).
+    var chats: [String: ChatSnapshot] = [:]
 }
 
 /// The phone's copy of what's going on, and the way to answer it.
@@ -32,6 +40,8 @@ final class PhoneStore {
     private(set) var problem: String?
     /// Commands sent but not yet reflected by the Mac, so their buttons show "Sent".
     private(set) var sent: [String: PhoneCommand.Kind] = [:]
+    /// Your messages on their way, by session, until the chat (or the queue for when it finishes) shows them.
+    private(set) var pending: [String: [PendingReply]] = [:]
     /// The Sessions tab's open pages (a tapped alert opens its session here).
     var path: [String] = []
     var tab = 0
@@ -43,6 +53,8 @@ final class PhoneStore {
 
     init(link: PhoneLink) {
         self.link = link
+        // Open on the sessions the app knew last time; the first refresh catches up
+        if let cached = link.cachedState() { state = cached }
         Self.current = self
     }
 
@@ -61,8 +73,13 @@ final class PhoneStore {
         loading = true
         defer { loading = false }
         do {
-            state = try await link.fetch()
+            var fetched = try await link.fetch()
+            // New messages reach an open chat with every refresh, not only when its page opens
+            for (id, chat) in fetched.chats where chats[id] != chat { chats[id] = chat }
+            fetched.chats = [:]
+            state = fetched
             problem = nil
+            clearDelivered()
             // A prompt the Mac no longer shows was answered: its "Sent" is done
             sent = sent.filter { id, _ in state.sessions.first { $0.id == id }?.prompt != nil }
         } catch {
@@ -70,6 +87,45 @@ final class PhoneStore {
             return
         }
         await PhoneGlance.update(state)
+    }
+
+    /// A message you sent, shown in its chat until it arrives.
+    @discardableResult
+    func addPending(_ text: String, to sessionId: String) -> UUID? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let reply = PendingReply(text: trimmed)
+        pending[sessionId, default: []].append(reply)
+        return reply.id
+    }
+
+    /// It never left the phone: why, in place of "Sending…".
+    func failPending(_ id: UUID?, in sessionId: String, because reason: String?) {
+        guard let id, let index = pending[sessionId]?.firstIndex(where: { $0.id == id }) else { return }
+        pending[sessionId]?[index].failure = reason ?? "Couldn't send it."
+    }
+
+    /// Sends a message, showing it in the chat until it arrives (or why it couldn't leave).
+    func sendReply(_ text: String, to sessionId: String) async {
+        let id = addPending(text, to: sessionId)
+        if !(await send(.reply(text), to: sessionId)) { failPending(id, in: sessionId, because: problem) }
+    }
+
+    func removePending(_ id: UUID, from sessionId: String) {
+        pending[sessionId]?.removeAll { $0.id == id }
+    }
+
+    /// Takes off the messages the chat now has, or the Mac queued for when the session finishes.
+    private func clearDelivered() {
+        for (sessionId, replies) in pending {
+            let said = (chats[sessionId]?.items ?? []).filter { $0.role == .you }.suffix(10).map(\.text)
+            let queued = state.sessions.first { $0.id == sessionId }?.extras?.followUps ?? []
+            let left = replies.filter { reply in
+                reply.failure != nil || !said.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(reply.text) }
+                    && !queued.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(reply.text) }
+            }
+            pending[sessionId] = left.isEmpty ? nil : left
+        }
     }
 
     /// That session's page is on screen, so its alert would say nothing new.
@@ -81,7 +137,9 @@ final class PhoneStore {
         if let chat = try? await link.chat(for: sessionId) { chats[sessionId] = chat }
     }
 
-    func send(_ kind: PhoneCommand.Kind, to sessionId: String) async {
+    /// Sends a command; false (with `problem` saying why) when it couldn't reach iCloud.
+    @discardableResult
+    func send(_ kind: PhoneCommand.Kind, to sessionId: String) async -> Bool {
         do {
             // An answer names the prompt it answers, in case the Mac has moved on to another
             let asked = kind.answersPrompt ? state.sessions.first { $0.id == sessionId }?.prompt?.asked : nil
@@ -91,51 +149,23 @@ final class PhoneStore {
                 sent[sessionId] = kind
                 await WatchManActivity.markSent(sessionId)
             }
+            return true
         } catch {
             problem = "Couldn't send: \(error.localizedDescription)"
+            return false
         }
     }
 }
 
-/// Sample sessions, for the first version of the app and for previews, before the iCloud link.
-struct SampleLink: PhoneLink {
-    func fetch() async throws -> PhoneState {
-        let now = Date()
-        func session(_ id: String, _ name: String, _ state: SessionSnapshot.State, _ detail: String, ago: TimeInterval,
-                     prompt: PromptSnapshot? = nil, unseen: Bool = false) -> SessionSnapshot {
-            SessionSnapshot(id: id, name: name, task: nil, colorKey: name, host: "Ghostty", canReply: true, state: state,
-                            detail: detail, since: now.addingTimeInterval(-ago), unseen: unseen, prompt: prompt,
-                            contextPercent: id == "m" ? 63 : nil, limitReset: nil, updated: now)
-        }
-        var allow = PendingApproval(tool: "Bash", detail: "Run · Build the release APK", requestedAt: now,
-                                    description: "Build the release APK", command: "flutter build apk --release --split-per-abi")
-        allow.handBackAt = now.addingTimeInterval(80)
-        let ask = PendingApproval(tool: "AskUserQuestion", detail: "AskUserQuestion", requestedAt: now, questions: [
-            AskedQuestion(question: "Which icon set should I use?", header: "Icons", options: [
-                .init(label: "Lucide", description: "Clean outline icons, over 1,400."),
-                .init(label: "Heroicons", description: "Tailwind's set, solid and outline."),
-            ]),
-        ])
-        return PhoneState(sessions: [
-            session("k", "Lumen", .needsYou, "Build the release APK", ago: 480, prompt: PromptSnapshot(approval: allow)),
-            session("a", "Harbor Web", .needsYou, "Which icon set should I use?", ago: 180, prompt: PromptSnapshot(approval: ask)),
-            session("m", "Trailmap", .working, "Edit · workout_screen.dart", ago: 300),
-            session("w", "WatchMan", .working, "Run · xcodebuild test", ago: 120),
-            session("c", "Shipyard", .done, "Build passed on Shipyard.", ago: 600, unseen: true),
-        ], usage: PlanUsage(session: UsageWindow(percent: 23, resetsAt: now.addingTimeInterval(3 * 3600)),
-                            week: UsageWindow(percent: 41, resetsAt: now.addingTimeInterval(3 * 86400))),
-        macName: "MacBook Pro", updated: now, extras: PhoneSamples.extras(now: now))
-    }
+/// A message on its way to the Mac.
+struct PendingReply: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let at = Date()
+    /// Why it couldn't be sent (iCloud said no); nil while it's on its way.
+    var failure: String?
 
-    func chat(for sessionId: String) async throws -> ChatSnapshot? {
-        let now = Date()
-        return ChatSnapshot(sessionId: sessionId, chat: [
-            .message(.init(id: 1, at: now.addingTimeInterval(-300), fromYou: true, text: "Build the release APK and upload it")),
-            .steps([.init(id: 2, at: now.addingTimeInterval(-280), kind: .tool, text: "Read · pubspec.yaml"),
-                    .init(id: 3, at: now.addingTimeInterval(-270), kind: .tool, text: "Run · flutter clean")]),
-            .message(.init(id: 4, at: now.addingTimeInterval(-200), fromYou: false, text: "The project is clean. I'll build the release APK split per ABI next.")),
-        ])
-    }
-
-    func send(_ command: PhoneCommand) async throws {}
+    /// The Mac drops commands it reads after ten minutes.
+    var lost: Bool { Date().timeIntervalSince(at) > PhoneCommand.maxAge }
 }
+

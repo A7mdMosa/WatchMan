@@ -171,13 +171,8 @@ struct QuestionForm: View {
                 Image(systemName: question.multiSelect ? (picked ? "checkmark.square.fill" : "square")
                       : (picked ? "largecircle.fill.circle" : "circle"))
                     .foregroundStyle(picked ? PhoneTheme.needsYou : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(option.label).font(.body.weight(.semibold)).foregroundStyle(.primary)
-                    if let description = option.description {
-                        Text(description).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Spacer(minLength: 0)
+                ChoiceText(option: option)
+                    .multilineTextAlignment(.leading)
             }
             .padding(10)
             .background(Color(picked ? .secondarySystemFill : .quaternarySystemFill), in: RoundedRectangle(cornerRadius: 10, style: .continuous))

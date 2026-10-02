@@ -289,6 +289,13 @@ final class NotchController {
         center.addObserver(forName: NSWindow.didResignKeyNotification, object: panel, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.store.panelHasKeyboard = false }
         }
+        // A new session's tab didn't open: say why beside the notch
+        center.addObserver(forName: .watchManStartFailed, object: nil, queue: .main) { [weak self] note in
+            let text = note.object as? String ?? "Couldn't open a terminal tab"
+            MainActor.assumeIsolated {
+                self?.store.announce(text, short: "Couldn't start Claude", tone: .error, seconds: 8, reaction: .error)
+            }
+        }
         center.addObserver(forName: .watchManStartInbox, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }

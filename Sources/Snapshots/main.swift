@@ -306,6 +306,22 @@ func run() {
     """
     render(SessionPageView(session: markdown, store: store, height: 440).padding(14), size: page, name: "7c-page-markdown",
            backdrop: .black)
+    // Claude's questions in the chat: one waiting for you, one answered, and steps that wrap on the phone
+    let release = AskedQuestion(question: "How should the repo go public? People can't download the release while it's private.",
+                                header: "Public repo", options: [
+                                    .init(label: "Fresh public repo (Recommended)", description: "Rename this one to WatchMan-dev and publish one clean commit."),
+                                    .init(label: "Make this repo public", description: "Keeps the whole history, including old personal data."),
+                                ])
+    let questionCards = VStack(alignment: .leading, spacing: 14) {
+        ChatStepsView(steps: [
+            .init(id: 1, at: Date(), kind: .tool, text: "Run · Tick the release in PLAN.md and refresh the percentages"),
+            .init(id: 2, at: Date(), kind: .tool, text: "Message · moussa-e1"),
+            .init(id: 3, at: Date(), kind: .tool, text: "Ask · Public repo"),
+        ])
+        QuestionChatCard(questions: [release], answers: [:], note: nil, waiting: true)
+        QuestionChatCard(questions: [release], answers: [release.question: "Fresh public repo (Recommended)"], note: nil)
+    }
+    render(questionCards.padding(16), size: CGSize(width: 390, height: 640), name: "7h-question-cards", backdrop: .black)
     if let pulse = store.sessions["e"] {
         render(SessionPageView(session: pulse, store: store, height: 440).padding(14), size: page, name: "7d-page-error",
                backdrop: .black)

@@ -1,3 +1,4 @@
+import ActivityKit
 import SwiftUI
 import UserNotifications
 import WatchManCore
@@ -12,6 +13,10 @@ struct SettingsScreen: View {
     @State private var notifications: UNAuthorizationStatus?
     @State private var newReply = ""
     @State private var liveActivity = PhoneSettings.liveActivity
+    @State private var dynamicIsland = PhoneSettings.dynamicIsland
+    /// Live Activities allowed for WatchMan in iOS Settings.
+    @State private var activitiesAllowed = true
+    @Environment(\.scenePhase) private var phase
     /// Changes wait a moment before going to the Mac, so a slider or a few stepper taps send one.
     @State private var sending: [String: Task<Void, Never>] = [:]
     @Environment(\.openURL) private var openURL
@@ -23,6 +28,7 @@ struct SettingsScreen: View {
         NavigationStack {
             Form {
                 linkSection
+                iphoneSection
                 if let settings {
                     answeringSection(settings)
                     alertsSection(settings)
@@ -44,6 +50,8 @@ struct SettingsScreen: View {
             notifications = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
             await store.ask(.refresh(.projects))
         }
+        // Back from iOS Settings: Live Activities may have been allowed there
+        .task(id: phase) { activitiesAllowed = ActivityAuthorizationInfo().areActivitiesEnabled }
         // The Mac's copy wins once your last change has had time to reach it
         .onChange(of: remote) { _, _ in
             if Date().timeIntervalSince(editedAt) > 8 { edited = nil }
@@ -105,6 +113,42 @@ struct SettingsScreen: View {
         }
     }
 
+    /// This iPhone's own choices: the Live Activity and its place in the Dynamic Island.
+    private var iphoneSection: some View {
+        Section {
+            Toggle("Live Activity", isOn: $liveActivity)
+                .onChange(of: liveActivity) { _, on in
+                    PhoneSettings.liveActivity = on
+                    Task { await applyLiveActivity() }
+                }
+            if liveActivity {
+                Toggle("Dynamic Island", isOn: $dynamicIsland)
+                    .onChange(of: dynamicIsland) { _, on in
+                        PhoneSettings.dynamicIsland = on
+                        Task { await applyLiveActivity() }
+                    }
+                if !activitiesAllowed {
+                    Button("Allow Live Activities in iOS Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                    }
+                }
+            }
+        } header: {
+            Text("This iPhone")
+        } footer: {
+            Text("The Live Activity shows what needs you and what's working on the Lock Screen and in the Dynamic Island while sessions work or wait. It starts when you open WatchMan. With Dynamic Island off, the island stays plain and only the Lock Screen shows the details; iOS doesn't let an app leave the island out entirely.")
+        }
+    }
+
+    /// The Live Activity follows the switches at once, from the last thing the Mac said.
+    private func applyLiveActivity() async {
+        if let glance = GlanceStore.load() {
+            await LiveActivity.update(glance)
+        } else if !liveActivity {
+            await LiveActivity.endAll()
+        }
+    }
+
     private func answeringSection(_ s: MacSettings) -> some View {
         Section {
             Toggle("Answer prompts from WatchMan", isOn: binding(\.approvalsEnabled, MacSettingChange.approvals))
@@ -131,18 +175,13 @@ struct SettingsScreen: View {
                 Toggle("Finished turns too", isOn: Binding(get: { s.iphoneFinishedAlerts ?? true },
                                                           set: { change(.iphoneFinishedAlerts($0)) }))
             }
-            Toggle("Live Activity", isOn: $liveActivity)
-                .onChange(of: liveActivity) { _, on in
-                    PhoneSettings.liveActivity = on
-                    Task { if on { await store.refresh() } else { await LiveActivity.endAll() } }
-                }
             Stepper(value: binding(\.awayAfterMinutes, MacSettingChange.awayAfterMinutes), in: MacSettings.Range.awayAfterMinutes) {
                 LabeledContent("Away after", value: "\(Int(s.awayAfterMinutes)) min idle")
             }
         } header: {
             Text("Alerts")
         } footer: {
-            Text("Alerts come for what needs you, an error, the usage limit and finished turns; work starting or going on shows only in the Live Activity. Away means the Mac has been idle that long, or is locked. The Live Activity shows on the lock screen and in the Dynamic Island while sessions work or wait; it starts when you open WatchMan.")
+            Text("Alerts come for what needs you, an error, the usage limit and finished turns; work starting or going on shows only in the Live Activity. Away means the Mac has been idle that long, or is locked.")
         }
     }
 
@@ -293,13 +332,18 @@ struct SettingsScreen: View {
 
     private var aboutSection: some View {
         Section {
-            if PhoneMode.isSample {
-                Button("Leave Sample Sessions") { PhoneMode.set(sample: false) }
-            } else {
-                Button("Try Sample Sessions") { PhoneMode.set(sample: true) }
-            }
+            Link("Privacy Policy", destination: WatchManWeb.privacy)
+            Link("Help and Support", destination: WatchManWeb.support)
+            Link("WatchMan for Mac", destination: WatchManWeb.macDownload)
             LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
             MacNoteLine(store: store)
         }
     }
+}
+
+/// WatchMan's pages on the web: the privacy policy, help, and the Mac app's download.
+enum WatchManWeb {
+    static let privacy = URL(string: "https://github.com/A7mdMosa/WatchMan/blob/main/PRIVACY.md")!
+    static let support = URL(string: "https://github.com/A7mdMosa/WatchMan/blob/main/SUPPORT.md")!
+    static let macDownload = URL(string: "https://github.com/A7mdMosa/WatchMan/releases/latest")!
 }

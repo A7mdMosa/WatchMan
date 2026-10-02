@@ -692,6 +692,8 @@ final class SessionStore {
 
 extension Notification.Name {
     static let watchManStartInbox = Notification.Name("watchManStartInbox")
+    /// A new or resumed session's tab didn't open; the object is why, in words.
+    static let watchManStartFailed = Notification.Name("watchManStartFailed")
 }
 
 /// A moment that needs nothing from you, told the way Settings → Notifications says.

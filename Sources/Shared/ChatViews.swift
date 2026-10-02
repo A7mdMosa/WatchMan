@@ -140,10 +140,11 @@ struct ChatStepsView: View {
             let (verb, detail) = Self.split(step.text)
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Text("●").font(ChatType.font(8)).foregroundStyle(Self.color(for: verb))
-                HStack(spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
                     Text(verb).fontWeight(.semibold).foregroundStyle(Palette.primary.opacity(0.9))
                     if let detail {
-                        Text("(\(detail))").foregroundStyle(Palette.secondary).lineLimit(1).truncationMode(.middle)
+                        Text("(\(detail))").foregroundStyle(Palette.secondary).lineLimit(Self.detailLines)
+                            .truncationMode(Self.detailLines == 1 ? .middle : .tail)
                     }
                 }
                 .font(ChatType.font(11.5, monospaced: true))
@@ -151,6 +152,13 @@ struct ChatStepsView: View {
             .help(step.text)
         }
     }
+
+    /// The phone is narrow: a step's detail gets two lines there, one on the Mac.
+    #if os(iOS)
+    private static let detailLines = 2
+    #else
+    private static let detailLines = 1
+    #endif
 
     /// "Edit · main.dart" → ("Edit", "main.dart").
     static func split(_ text: String) -> (String, String?) {
@@ -165,7 +173,8 @@ struct ChatStepsView: View {
         case "Edit", "Write": Palette.working
         case "Run": Palette.claude
         case "Read", "Search", "Find": Palette.unseen
-        case "Agent", "Skill": Palette.obsidian
+        case "Agent", "Skill", "Message": Palette.obsidian
+        case "Ask", "Plan ready": Palette.needsYou
         case "Fetch", "Web search": Palette.web
         default: Palette.faint
         }
@@ -343,3 +352,126 @@ struct CodeBlockView: View {
     }
 }
 
+
+/// Your prompt as you typed it, without the tags Claude Code wraps pasted text in.
+enum ChatText {
+    static func cleanPrompt(_ text: String) -> String {
+        text.replacingOccurrences(of: #"</?pasted_content[^>]*>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// "Fresh repo (Recommended)" → ("Fresh repo", true): the tag Claude adds to a choice, shown as a badge.
+    static func choice(_ label: String) -> (text: String, recommended: Bool) {
+        guard let range = label.range(of: "(Recommended)", options: [.caseInsensitive, .backwards]) else { return (label, false) }
+        let text = label.replacingCharacters(in: range, with: "").trimmingCharacters(in: .whitespaces)
+        return (text.isEmpty ? label : text, true)
+    }
+}
+
+/// A choice's words: its label (with a Recommended badge when Claude marked it) and what it means.
+struct ChoiceText: View {
+    let option: AskedQuestion.Option
+    /// Lines of the description shown; nil shows all of it.
+    var descriptionLines: Int?
+
+    var body: some View {
+        let choice = ChatText.choice(option.label)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(choice.text)
+                    .font(ChatType.font(13, weight: .semibold))
+                    .foregroundStyle(Palette.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if choice.recommended {
+                    Text("Recommended")
+                        .font(ChatType.font(10, weight: .semibold))
+                        .foregroundStyle(Palette.working)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Palette.working.opacity(0.14), in: Capsule())
+                        .fixedSize()
+                }
+            }
+            if let description = option.description {
+                Text(description)
+                    .font(ChatType.font(11.5))
+                    .foregroundStyle(Palette.secondary)
+                    .lineLimit(descriptionLines)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Claude's questions in the chat: what it asked, the choices it offered, and what you picked (or that it
+/// waits for you). Read-only; the answer buttons are on the prompt card.
+struct QuestionChatCard: View {
+    let questions: [AskedQuestion]
+    let answers: [String: String]
+    let note: String?
+    /// Still waiting for your answer.
+    var waiting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "questionmark.bubble.fill")
+                        Text("Claude asks")
+                        if let header = question.header {
+                            Text("·")
+                            Text(header)
+                        }
+                    }
+                    .font(ChatType.font(11, weight: .bold))
+                    .foregroundStyle(Palette.needsYou)
+                    .textCase(.uppercase)
+                    .accessibilityElement(children: .combine)
+                    MarkdownText(text: question.question)
+                        .font(ChatType.font(13.5, weight: .semibold))
+                        .foregroundStyle(Palette.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    let picked = Set((answers[question.question] ?? "").components(separatedBy: ", "))
+                    ForEach(question.options, id: \.label) { option in
+                        let chosen = picked.contains(option.label)
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: chosen ? "checkmark.circle.fill" : "circle")
+                                .font(ChatType.font(12))
+                                .foregroundStyle(chosen ? Palette.working : Palette.faint)
+                            ChoiceText(option: option, descriptionLines: answers.isEmpty ? nil : 2)
+                        }
+                        .opacity(answers.isEmpty || chosen ? 1 : 0.6)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(chosen ? .isSelected : [])
+                    }
+                    // Your own words instead of a choice
+                    if let answer = answers[question.question], !question.options.contains(where: { $0.label == answer }),
+                       !answer.components(separatedBy: ", ").allSatisfy({ label in question.options.contains { $0.label == label } }) {
+                        answerLine(answer)
+                    }
+                }
+            }
+            if let note { answerLine(note) }
+            if waiting && answers.isEmpty && note == nil {
+                Label("Waiting for your answer below", systemImage: "arrow.down.circle")
+                    .font(ChatType.font(11.5, weight: .semibold))
+                    .foregroundStyle(Palette.needsYou)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background((waiting ? Palette.needsYou.opacity(0.1) : Palette.fill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(waiting ? Palette.needsYou.opacity(0.35) : Palette.line, lineWidth: 1))
+        .textSelection(.enabled)
+    }
+
+    private func answerLine(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("You answered").font(ChatType.font(11.5, weight: .semibold)).foregroundStyle(Palette.secondary)
+            Text(text).font(ChatType.font(12.5)).foregroundStyle(Palette.primary)
+        }
+    }
+}

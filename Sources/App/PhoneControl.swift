@@ -217,7 +217,8 @@ final class PhoneControl {
         let command = text.isEmpty ? "claude" : "claude \(Script.shellQuote(text))"
         Task {
             let ok = await Hosts.startSession(in: folder, command: command)
-            say(ok ? "Started Claude in \((folder as NSString).lastPathComponent)" : "Couldn't open a terminal tab")
+            say(ok ? "Started Claude in \((folder as NSString).lastPathComponent)"
+                : "Couldn't start: " + (Hosts.lastStartProblem ?? "the terminal didn't open a tab."))
         }
     }
 
@@ -225,7 +226,8 @@ final class PhoneControl {
         guard MacCommand.isChatId(chatId), Self.isFolder(folder) else { say("Couldn't resume that chat"); return }
         Task {
             let ok = await Hosts.startSession(in: folder, command: "claude --resume \(chatId)")
-            say(ok ? "Resumed in \((folder as NSString).lastPathComponent)" : "Couldn't open a terminal tab")
+            say(ok ? "Resumed in \((folder as NSString).lastPathComponent)"
+                : "Couldn't resume: " + (Hosts.lastStartProblem ?? "the terminal didn't open a tab."))
         }
     }
 

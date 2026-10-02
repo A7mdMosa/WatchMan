@@ -68,6 +68,6 @@ if [ "$1" = "--publish" ]; then
     else
         COMMIT=$(git commit-tree "HEAD^{tree}" -m "WatchMan $VERSION")
     fi
-    git push -q "$URL" "$COMMIT:refs/heads/main"
+    git push -q "$URL" "${COMMIT}:refs/heads/main"
     gh release create "v$VERSION" "$ZIP" --repo "$PUBLIC" --target main --title "WatchMan $VERSION" --generate-notes
 fi

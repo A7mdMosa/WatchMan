@@ -744,6 +744,56 @@ final class ChatAndWorkTests: XCTestCase {
         XCTAssertEqual(state.tasks.doneCount, 1)
     }
 
+    func testClaudesQuestionsAndAnswersAreInTheChat() {
+        var state = TranscriptState()
+        func assistant(_ blocks: [[String: Any]]) -> Data {
+            line(["type": "assistant", "timestamp": "2026-10-01T08:00:00.000Z", "message": ["id": UUID().uuidString, "content": blocks]])
+        }
+        let questions: [[String: Any]] = [[
+            "question": "How should the repo go public?", "header": "Public repo", "multiSelect": false,
+            "options": [["label": "Fresh public repo (Recommended)", "description": "One clean commit."],
+                        ["label": "Make this repo public", "description": "Keeps the history."]],
+        ]]
+        state.consume(line: line(["type": "user", "timestamp": "2026-10-01T07:59:00.000Z", "message": ["content": "Release it"]]))
+        state.consume(line: assistant([["type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": ["questions": questions]]]))
+        guard case .message(let asked)? = state.chat.last else { return XCTFail("the question isn't in the chat") }
+        XCTAssertEqual(asked.questions.first?.header, "Public repo")
+        XCTAssertTrue(asked.answers.isEmpty)
+        XCTAssertNil(asked.answerNote)
+        XCTAssertEqual(state.timeline.last?.text, "Ask · Public repo")
+
+        // Answered: Claude Code's structured result
+        state.consume(line: line(["type": "user", "timestamp": "2026-10-01T08:00:30.000Z",
+                                  "toolUseResult": ["answers": ["How should the repo go public?": "Fresh public repo (Recommended)"]],
+                                  "message": ["content": [["type": "tool_result", "tool_use_id": "q1",
+                                                           "content": "Your questions have been answered: …"]]]]))
+        guard case .message(let answered)? = state.chat.last else { return XCTFail() }
+        XCTAssertEqual(answered.answers["How should the repo go public?"], "Fresh public repo (Recommended)")
+        XCTAssertTrue(answered.text.contains("Fresh public repo (Recommended) ✓"))
+        let item = ChatSnapshot(sessionId: "s", chat: state.chat).items.last
+        XCTAssertEqual(item?.role, .claude)
+        XCTAssertEqual(item?.questions?.count, 1)
+        XCTAssertEqual(item?.answers?["How should the repo go public?"], "Fresh public repo (Recommended)")
+
+        // From the result text alone, and a skipped one
+        state.consume(line: assistant([["type": "tool_use", "id": "q2", "name": "AskUserQuestion", "input": ["questions": questions]]]))
+        state.consume(line: line(["type": "user", "message": ["content": [["type": "tool_result", "tool_use_id": "q2",
+            "content": "Your questions have been answered: \"How should the repo go public?\"=\"Make this repo public\". You can now continue."]]]]))
+        guard case .message(let fromText)? = state.chat.last else { return XCTFail() }
+        XCTAssertEqual(fromText.answers["How should the repo go public?"], "Make this repo public")
+        state.consume(line: assistant([["type": "tool_use", "id": "q3", "name": "AskUserQuestion", "input": ["questions": questions]]]))
+        state.consume(line: line(["type": "user", "message": ["content": [["type": "tool_result", "tool_use_id": "q3", "is_error": true,
+            "content": "The user doesn't want to proceed with this tool use. To tell you how to proceed, the user said:\nUse the old repo\n"]]]]))
+        guard case .message(let skipped)? = state.chat.last else { return XCTFail() }
+        XCTAssertEqual(skipped.answerNote, "Use the old repo")
+    }
+
+    func testClearerStepNames() {
+        XCTAssertEqual(Session.stepLabel(tool: "SendMessage", input: ["to": "moussa-e1"]), "Message · moussa-e1")
+        XCTAssertEqual(Session.stepLabel(tool: "AskUserQuestion", input: [:]), "Ask")
+        XCTAssertEqual(Session.stepLabel(tool: "ToolSearch", input: ["query": "select:Read"]), "Load tools")
+    }
+
     func testSubagentStepAndFinish() {
         var agent = SubagentState()
         agent.consume(line: line(["type": "assistant", "timestamp": "2026-10-01T08:00:00.000Z",

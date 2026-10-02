@@ -1,13 +1,14 @@
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 import WatchManCore
 
 @main
 struct WatchManPhoneApp: App {
     @UIApplicationDelegateAdaptor(PhoneAppDelegate.self) private var delegate
     @Environment(\.scenePhase) private var phase
-    /// The real link through iCloud; the sample data only with -sample (for screenshots).
-    @State private var store = PhoneStore(link: PhoneMode.link())
+    /// The link to the Mac through iCloud.
+    @State private var store = PhoneStore(link: CloudLink())
 
     var body: some Scene {
         WindowGroup {
@@ -19,7 +20,8 @@ struct WatchManPhoneApp: App {
                 Tab("Settings", systemImage: "gearshape", value: 3) { SettingsScreen(store: store) }
             }
             // System opens from its row on the Overview
-            .minimizesTabBarOnScroll()
+            // Scrolling puts the keyboard away (dragging down with it, as in Messages)
+            .scrollDismissesKeyboard(.interactively)
             // A widget or the Live Activity opens its session (or just the app)
             .onOpenURL { url in
                 guard let id = PhoneLinks.sessionId(in: url) else { return }
@@ -31,11 +33,6 @@ struct WatchManPhoneApp: App {
                 guard let id = note.object as? String else { return }
                 store.tab = 0
                 store.path = [id]
-                Task { await store.refresh() }
-            }
-            // Sample sessions on or off: start over with the other link
-            .onReceive(NotificationCenter.default.publisher(for: .watchManPhoneModeChanged)) { _ in
-                store = PhoneStore(link: PhoneMode.link())
                 Task { await store.refresh() }
             }
             .tint(PhoneTheme.accent)
@@ -83,8 +80,8 @@ struct SessionsScreen: View {
                         } description: {
                             Text(problem)
                         } actions: {
-                            Button("Try It with Sample Sessions") { PhoneMode.set(sample: true) }
-                                .buttonStyle(.bordered)
+                            Link("Get WatchMan for Mac", destination: WatchManWeb.macDownload)
+                                .buttonStyle(.borderedProminent)
                         }
                     } else {
                         ContentUnavailableView {
@@ -112,18 +109,6 @@ struct SessionsScreen: View {
     }
 }
 
-extension View {
-    /// The tab bar shrinks while you scroll down, on iOS 26 and later.
-    @ViewBuilder
-    func minimizesTabBarOnScroll() -> some View {
-        if #available(iOS 26.0, *) {
-            tabBarMinimizeBehavior(.onScrollDown)
-        } else {
-            self
-        }
-    }
-}
-
 struct SessionRow: View {
     let session: SessionSnapshot
 
@@ -143,17 +128,32 @@ struct SessionRow: View {
 
 struct StateChip: View {
     let session: SessionSnapshot
+    /// The state in words too ("Working · 2 min"), where nothing else says it (the session page).
+    var showsState = false
 
     var body: some View {
         let color = PhoneTheme.color(session.state)
         HStack(spacing: 4) {
             Image(systemName: symbol).font(.caption2.weight(.bold))
-            Text(session.since, format: .relative(presentation: .numeric, unitsStyle: .narrow)).font(.caption.weight(.semibold))
+            if showsState {
+                Text(stateText).font(.caption.weight(.semibold))
+            } else {
+                Text(session.since, format: .relative(presentation: .numeric, unitsStyle: .narrow)).font(.caption.weight(.semibold))
+            }
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(color.opacity(0.15), in: Capsule())
+    }
+
+    /// "Working · 2 min", "Done · 5 min ago".
+    private var stateText: String {
+        let seconds = max(0, Date().timeIntervalSince(session.since))
+        let span = seconds < 60 ? "just now" : seconds < 3600 ? "\(Int(seconds / 60)) min"
+            : seconds < 86_400 ? "\(Int(seconds / 3600)) h" : "\(Int(seconds / 86_400)) d"
+        let past = session.state == .done || session.state == .idle
+        return PhoneTheme.title(session.state) + " · " + span + (past && seconds >= 60 ? " ago" : "")
     }
 
     private var symbol: String {
@@ -184,6 +184,8 @@ struct SessionScreen: View {
     @State private var photos: [Data] = []
     @State private var picked: [PhotosPickerItem] = []
     @State private var sendNote: String?
+    /// The clipboard holds an image to paste into the reply.
+    @State private var clipboardHasImage = false
 
     enum Tab: String, CaseIterable { case chat = "Chat", steps = "Steps", changes = "Changes" }
 
@@ -208,7 +210,7 @@ struct SessionScreen: View {
         .refreshable {
             await store.refresh()
             await store.loadChat(sessionId)
-            if tab == .changes, !PhoneMode.isSample { await store.ask(.changes, session: sessionId) }
+            if tab == .changes { await store.ask(.changes, session: sessionId) }
         }
         .topBar { if let session { header(session) } }
         .safeAreaInset(edge: .bottom, spacing: 0) { foot }
@@ -234,7 +236,7 @@ struct SessionScreen: View {
     private func header(_ session: SessionSnapshot) -> some View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
-                StateChip(session: session)
+                StateChip(session: session, showsState: true)
                 if let context = session.contextPercent {
                     Text("Context \(Int(context))%").font(.caption.weight(.semibold))
                         .foregroundStyle(context >= 80 ? PhoneTheme.limit : .secondary)
@@ -255,13 +257,14 @@ struct SessionScreen: View {
     /// A tab's own scroll. Each opens at the newest, at the end, and follows what comes while you're there.
     @ViewBuilder
     private func content(_ page: Tab, _ session: SessionSnapshot) -> some View {
-        // Something new at the end: another item, or more steps on the last one
-        let end = chat.map { "\($0.items.count)-\($0.items.last?.text.count ?? 0)" }
+        // Something new at the end: another item, more steps on the last one, or a message you just sent
+        let end = chat.map { "\($0.items.count)-\($0.items.last?.text.count ?? 0)-\(store.pending[sessionId]?.count ?? 0)" }
         switch page {
         case .chat:
             NewestLastScroll(end: end) {
                 EarlierMessagesButton(store: store, sessionId: sessionId)
-                ChatList(chat: chat)
+                ChatList(chat: chat, waitingOnQuestion: session.prompt?.kind == .question)
+                PendingReplies(store: store, sessionId: sessionId)
                 SessionExtrasView(store: store, session: session)
             }
         case .steps:
@@ -299,6 +302,20 @@ struct SessionScreen: View {
         HStack(spacing: 8) {
             // Photos go with a plain reply (not an answer to a question or a plan)
             if session?.prompt == nil {
+                // An image you copied (a screenshot, a photo): the system's Paste button, so iOS doesn't ask first
+                if clipboardHasImage {
+                    PasteButton(supportedContentTypes: [.image]) { providers in
+                        for provider in providers where provider.canLoadObject(ofClass: UIImage.self) {
+                            _ = provider.loadObject(ofClass: UIImage.self) { object, _ in
+                                guard let image = object as? UIImage, let data = PhonePhotos.jpeg(image) else { return }
+                                Task { @MainActor in if photos.count < 6 { photos.append(data) } }
+                            }
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonBorderShape(.circle)
+                    .accessibilityLabel("Paste image")
+                }
                 PhotosPicker(selection: $picked, maxSelectionCount: 6, matching: .images) {
                     Image(systemName: "photo.on.rectangle").font(.title3)
                         .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
@@ -325,13 +342,15 @@ struct SessionScreen: View {
                 sendNote = nil
                 Task {
                     if !attached.isEmpty, session?.prompt == nil {
+                        let id = store.addPending(text, to: sessionId)
                         sendNote = await store.reply(text, photos: attached, to: sessionId)
+                        if let sendNote { store.failPending(id, in: sessionId, because: sendNote) }
                     } else if session?.prompt?.kind == .plan {
                         await store.send(.deny(message: text), to: sessionId)
                     } else if session?.prompt?.kind == .question {
                         await store.send(.answer(QuestionAnswers(response: text)), to: sessionId)
                     } else {
-                        await store.send(.reply(text), to: sessionId)
+                        await store.sendReply(text, to: sessionId)
                     }
                 }
             } label: {
@@ -341,6 +360,14 @@ struct SessionScreen: View {
             .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photos.isEmpty)
             .accessibilityLabel("Send")
         }
+        }
+        // Whether there's an image to paste, checked without reading the clipboard (so iOS doesn't ask)
+        .onAppear { clipboardHasImage = UIPasteboard.general.hasImages }
+        .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in
+            clipboardHasImage = UIPasteboard.general.hasImages
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            clipboardHasImage = UIPasteboard.general.hasImages
         }
     }
 
@@ -369,13 +396,31 @@ struct NewestLastScroll<Content: View>: View {
                 .padding()
         }
         .scrollPosition($position)
+        .scrollDismissesKeyboard(.interactively)
         // Opens at the newest, even when the page is pushed with the content already there
         .defaultScrollAnchor(.bottom, for: .initialOffset)
         // Within a short way of the end counts as there
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.visibleRect.maxY >= geometry.contentSize.height - 60
         } action: { _, now in
-            atEnd = now
+            withAnimation(.smooth(duration: 0.2)) { atEnd = now }
+        }
+        // Scrolled back to read: one tap back to the newest
+        .overlay(alignment: .bottomTrailing) {
+            if !atEnd {
+                Button { withAnimation { position.scrollTo(edge: .bottom) } } label: {
+                    Image(systemName: "arrow.down")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 44, height: 44)
+                        .background(.regularMaterial, in: Circle())
+                        .overlay(Circle().strokeBorder(Color(.separator), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+                }
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
+                .accessibilityLabel("Jump to the newest")
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
         }
         .onChange(of: end) { old, _ in
             if old == nil {
@@ -457,9 +502,18 @@ struct PromptCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 10 : 12) {
-            Label(heading, systemImage: symbol).font(.caption.weight(.bold)).foregroundStyle(PhoneTheme.needsYou)
-                .textCase(.uppercase)
-            Text(prompt.title).font(.headline).lineLimit(compact ? 3 : nil)
+            HStack(spacing: 6) {
+                Label(heading, systemImage: symbol)
+                if prompt.kind == .question, prompt.questions.count == 1, let header = prompt.questions.first?.header {
+                    Text("· " + header)
+                }
+            }
+            .font(.caption.weight(.bold)).foregroundStyle(PhoneTheme.needsYou)
+            .textCase(.uppercase)
+            // A question is read in full: it's what you answer
+            Text(prompt.title).font(.headline)
+                .lineLimit(compact && prompt.kind != .question ? 3 : nil)
+                .fixedSize(horizontal: false, vertical: true)
             if let command = prompt.command {
                 Text("$ " + command).font(.callout.monospaced()).lineLimit(compact ? 2 : nil).padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -551,13 +605,9 @@ struct PromptCard: View {
                         Button {
                             Task { await store.send(.answer(QuestionAnswers(answers: [question.question: option.label])), to: session.id) }
                         } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.label).font(.body.weight(.semibold))
-                                if let description = option.description {
-                                    Text(description).font(.caption).foregroundStyle(.secondary).lineLimit(compact ? 2 : nil)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            ChoiceText(option: option, descriptionLines: compact ? 3 : nil)
+                                .multilineTextAlignment(.leading)
+                                .padding(.vertical, 2)
                         }
                         .buttonStyle(.bordered)
                     }
@@ -586,7 +636,7 @@ struct PromptCard: View {
     private var heading: String {
         switch prompt.kind {
         case .permission: "Permission"
-        case .question: "Question"
+        case .question: "Claude asks"
         case .plan: "Plan ready"
         }
     }
@@ -604,17 +654,20 @@ struct PromptCard: View {
 /// the Mac), the steps between.
 struct ChatList: View {
     let chat: ChatSnapshot?
+    /// The session waits on a question: the last question card says so.
+    var waitingOnQuestion = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let chat, !chat.items.isEmpty {
-                ForEach(Array(chat.items.enumerated()), id: \.offset) { _, item in
+                let lastQuestion = chat.items.lastIndex { $0.questions?.isEmpty == false }
+                ForEach(Array(chat.items.enumerated()), id: \.offset) { index, item in
                     switch item.role {
                     case .you:
-                        Text(item.text).font(.callout).padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
-                            .textSelection(.enabled)
+                        YourMessage(text: ChatText.cleanPrompt(item.text))
+                    case .claude where item.questions?.isEmpty == false:
+                        QuestionChatCard(questions: item.questions ?? [], answers: item.answers ?? [:], note: item.answerNote,
+                                         waiting: waitingOnQuestion && index == lastQuestion)
                     case .claude:
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text("●").font(.system(size: 9)).foregroundStyle(Palette.primary)
@@ -629,6 +682,78 @@ struct ChatList: View {
                 Text("Nothing said yet.").foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+/// Your messages on their way to the Mac, at the end of the chat: sending, waiting for the Mac (asleep, or
+/// iCloud is slow), or lost after ten minutes, with Send Again.
+struct PendingReplies: View {
+    let store: PhoneStore
+    let sessionId: String
+
+    var body: some View {
+        if let replies = store.pending[sessionId], !replies.isEmpty {
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(replies) { reply in
+                        VStack(alignment: .leading, spacing: 6) {
+                            YourMessage(text: reply.text).opacity(0.6)
+                            status(reply, now: context.date)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func status(_ reply: PendingReply, now: Date) -> some View {
+        let age = now.timeIntervalSince(reply.at)
+        if reply.failure != nil || reply.lost {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(reply.failure ?? "Not delivered: your Mac didn't pick it up", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(PhoneTheme.failed)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 16) {
+                    Button("Send Again") {
+                        store.removePending(reply.id, from: sessionId)
+                        Task { await store.sendReply(reply.text, to: sessionId) }
+                    }
+                    Button("Remove", role: .destructive) { store.removePending(reply.id, from: sessionId) }
+                }
+            }
+            .font(.caption.weight(.medium))
+        } else {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(age < 20 ? "Sending…" : "Waiting for your Mac to pick it up…")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Your prompt in the chat. A long one (pasted text) shows its start, the rest a tap away.
+struct YourMessage: View {
+    let text: String
+    @State private var open = false
+
+    private var long: Bool { text.count > 600 || text.filter { $0 == "\n" }.count > 10 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(text).font(.callout)
+                .lineLimit(open || !long ? nil : 8)
+                .textSelection(.enabled)
+            if long {
+                Button(open ? "Show Less" : "Show All") { withAnimation(.smooth(duration: 0.2)) { open.toggle() } }
+                    .font(.footnote.weight(.semibold))
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

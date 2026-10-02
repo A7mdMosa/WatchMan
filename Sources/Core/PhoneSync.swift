@@ -207,6 +207,11 @@ public struct ChatSnapshot: Codable, Equatable, Sendable {
         public var role: Role
         public var text: String
         public var at: Date
+        /// Claude's questions, their answers or how they ended (optional: older Macs don't send them, and older
+        /// phones read `text`, which says the same in markdown).
+        public var questions: [AskedQuestion]?
+        public var answers: [String: String]?
+        public var answerNote: String?
     }
 
     public var sessionId: String
@@ -241,7 +246,11 @@ public struct ChatSnapshot: Codable, Equatable, Sendable {
             switch item {
             case .message(let message):
                 let text = message.text.count > Self.maxCharacters ? String(message.text.prefix(Self.maxCharacters)) + "…" : message.text
-                return Item(role: message.fromYou ? .you : .claude, text: text, at: message.at)
+                guard !message.questions.isEmpty else {
+                    return Item(role: message.fromYou ? .you : .claude, text: text, at: message.at)
+                }
+                return Item(role: .claude, text: text, at: message.at, questions: message.questions,
+                            answers: message.answers.isEmpty ? nil : message.answers, answerNote: message.answerNote)
             case .steps(let steps):
                 return Item(role: .steps, text: steps.suffix(8).map(\.text).joined(separator: "\n"), at: steps.last?.at ?? Date())
             }

@@ -34,18 +34,43 @@ public struct TranscriptState: Sendable, Equatable {
     public var tasks: [ClaudeTask] = []
     /// TaskCreate calls waiting for their result, which gives the task its number.
     private var pendingTaskCreates: [String: String] = [:]
+    /// Questions (AskUserQuestion) waiting for their answer: the tool call's id and the chat message showing them.
+    private var pendingQuestions: [String: Int] = [:]
 
     public struct Message: Sendable, Equatable, Identifiable {
         public var id: Int
         public var at: Date
         public var fromYou: Bool
+        /// The message as markdown. For Claude's questions, the questions, their choices and the answer as text.
         public var text: String
+        /// Claude's questions (AskUserQuestion), when this message is one.
+        public var questions: [AskedQuestion] = []
+        /// The picked choices by question, once answered.
+        public var answers: [String: String] = [:]
+        /// How the questions ended when not by picking: skipped, or your own words.
+        public var answerNote: String?
 
         public init(id: Int, at: Date, fromYou: Bool, text: String) {
             self.id = id
             self.at = at
             self.fromYou = fromYou
             self.text = text
+        }
+
+        /// The questions as plain markdown, for places that only show text.
+        public static func questionsText(_ questions: [AskedQuestion], answers: [String: String], note: String?) -> String {
+            var lines: [String] = []
+            for question in questions {
+                lines.append("**Claude asks:** " + question.question)
+                let picked = Set((answers[question.question] ?? "").components(separatedBy: ", "))
+                for option in question.options {
+                    lines.append("- " + option.label + (picked.contains(option.label) ? " ✓" : ""))
+                }
+                if let answer = answers[question.question] { lines.append("**You answered:** " + answer) }
+                lines.append("")
+            }
+            if let note { lines.append("**You answered:** " + note) }
+            return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 
@@ -215,7 +240,7 @@ public struct TranscriptState: Sendable, Equatable {
                 }
             }
             for block in message["content"] as? [[String: Any]] ?? [] {
-                if block["type"] as? String == "tool_result" { toolResult(block, at: at) }
+                if block["type"] as? String == "tool_result" { toolResult(block, at: at, result: object["toolUseResult"]) }
                 if block["type"] as? String == "text", let text = block["text"] as? String,
                    text.contains("<command-name>/project-sync</command-name>") {
                     lastProjectSyncAt = at
@@ -245,6 +270,17 @@ public struct TranscriptState: Sendable, Equatable {
         let name = block["name"] as? String ?? ""
         let input = block["input"] as? [String: Any] ?? [:]
         let stringInput = input.compactMapValues { $0 as? String }
+        // Claude's questions are part of the chat: the questions, their choices, then your answer
+        if name == "AskUserQuestion" {
+            let questions = AskedQuestion.list(from: input)
+            if !questions.isEmpty, let id = addMessage(fromYou: false, Message.questionsText(questions, answers: [:], note: nil), at: at) {
+                conversation[conversation.count - 1].questions = questions
+                if let toolId = block["id"] as? String { pendingQuestions[toolId] = id }
+                let topic = questions.first.map { $0.header ?? $0.question } ?? ""
+                addTimeline(.tool, "Ask · " + topic, at: at, messageId: id)
+                return
+            }
+        }
         addTimeline(.tool, Session.stepLabel(tool: name, input: stringInput), at: at)
         switch name {
         case "Bash":
@@ -288,8 +324,12 @@ public struct TranscriptState: Sendable, Equatable {
         }
     }
 
-    private mutating func toolResult(_ block: [String: Any], at: Date) {
+    private mutating func toolResult(_ block: [String: Any], at: Date, result: Any? = nil) {
         guard let id = block["tool_use_id"] as? String else { return }
+        if let messageId = pendingQuestions.removeValue(forKey: id) {
+            answer(messageId, block: block, result: result)
+            return
+        }
         // "Task #3 created successfully: …" gives a new task its number
         if let subject = pendingTaskCreates.removeValue(forKey: id) {
             let text = TranscriptState.text(of: block["content"])
@@ -312,6 +352,32 @@ public struct TranscriptState: Sendable, Equatable {
         }
         let what = check == .analyze ? "analyze" : "tests"
         addTimeline(result == .passed ? .passed : .failed, result == .passed ? "\(what) passed" : "\(what) failed", at: at)
+    }
+
+    /// Fills in how Claude's questions were answered: the picked choices (Claude Code's `toolUseResult.answers`,
+    /// or the `"question"="answer"` pairs of its result text), or why there's no pick.
+    private mutating func answer(_ messageId: Int, block: [String: Any], result: Any?) {
+        guard let index = conversation.firstIndex(where: { $0.id == messageId }) else { return }
+        let text = TranscriptState.text(of: block["content"])
+        var answers = (result as? [String: Any])?["answers"] as? [String: String] ?? [:]
+        if answers.isEmpty {
+            let pairs = text.matches(of: #/"([^"]+)"="([^"]*)"/#)
+            for pair in pairs { answers[String(pair.output.1)] = String(pair.output.2) }
+        }
+        var message = conversation[index]
+        message.answers = answers
+        if answers.isEmpty {
+            if text.contains("wants to clarify") {
+                message.answerNote = "You wanted to clarify"
+            } else if let range = text.range(of: "the user said:\n") {
+                let said = text[range.upperBound...].split(separator: "\n").first.map(String.init) ?? ""
+                message.answerNote = said.isEmpty ? "Skipped" : said
+            } else {
+                message.answerNote = "Skipped"
+            }
+        }
+        message.text = Message.questionsText(message.questions, answers: message.answers, note: message.answerNote)
+        conversation[index] = message
     }
 
     /// Only commands that actually run analyze or test count, not ones that merely mention them

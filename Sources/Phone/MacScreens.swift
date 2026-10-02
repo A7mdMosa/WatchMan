@@ -114,6 +114,8 @@ struct NewSessionSheet: View {
     let store: PhoneStore
     @Environment(\.dismiss) private var dismiss
     @State private var filter = ""
+    /// The Mac was asked for its projects a while ago and hasn't sent them.
+    @State private var noAnswer = false
 
     private var groups: [(name: String, projects: [ProjectSnapshot])] {
         let projects = (store.extras?.projects ?? []).filter {
@@ -127,15 +129,27 @@ struct NewSessionSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if store.extras?.projects == nil {
+                if let projects = store.extras?.projects {
+                    if projects.isEmpty {
+                        ContentUnavailableView("No Projects Yet", systemImage: "folder",
+                                               description: Text("Folders you've used Claude Code in on the Mac, and projects linked to Obsidian notes, show up here."))
+                    }
+                } else if noAnswer {
+                    ContentUnavailableView {
+                        Label("Your Mac hasn't answered", systemImage: "desktopcomputer.trianglebadge.exclamationmark")
+                    } description: {
+                        Text("It may be asleep or offline, or WatchMan isn't open on it.")
+                    } actions: {
+                        Button("Try Again") { Task { await askForProjects() } }.buttonStyle(.bordered)
+                    }
+                } else {
                     WaitingForMac(text: "Reading your projects…")
                 }
                 ForEach(groups, id: \.name) { group in
                     Section(group.name) {
+                        // By value, so a list refresh never pops the open project
                         ForEach(group.projects) { project in
-                            NavigationLink {
-                                StartScreen(store: store, project: project) { dismiss() }
-                            } label: {
+                            NavigationLink(value: project.root) {
                                 HStack(spacing: 12) {
                                     ProjectBadge(name: project.name, key: project.root)
                                     Text(project.name)
@@ -152,21 +166,37 @@ struct NewSessionSheet: View {
             }
             .navigationTitle("New Session")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: String.self) { root in
+                StartScreen(store: store, root: root) { dismiss() }
+            }
             .searchable(text: $filter, prompt: "Projects")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             }
         }
-        .task { await store.ask(.refresh(.projects)) }
+        .task { await askForProjects() }
+    }
+
+    private func askForProjects() async {
+        noAnswer = false
+        await store.ask(.refresh(.projects))
+        if store.extras?.projects == nil { noAnswer = true }
     }
 }
 
-/// One project: start Claude there with a message, a starter, or one of its To-dos.
+/// One project: start Claude there with a message, a starter, or one of its To-dos. It stays open until the new
+/// session shows up (then opens it), or says why it couldn't start.
 struct StartScreen: View {
     let store: PhoneStore
-    let project: ProjectSnapshot
+    let root: String
     let done: () -> Void
     @State private var message = ""
+    @State private var phase = Phase.ready
+
+    enum Phase: Equatable { case ready, starting, failed(String) }
+
+    private var project: ProjectSnapshot? { store.extras?.projects?.first { $0.root == root } }
+    private var name: String { project?.name ?? (root as NSString).lastPathComponent }
 
     var body: some View {
         Form {
@@ -179,18 +209,35 @@ struct StartScreen: View {
                     Label("Start Claude", systemImage: "play.fill")
                 }
             } footer: {
-                Text("Opens a new terminal tab on the Mac in \(project.root).")
+                Text("Opens a new terminal tab on the Mac in \(root).")
             }
-            if !project.starters.isEmpty {
+            switch phase {
+            case .ready:
+                EmptyView()
+            case .starting:
+                Section {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Starting Claude in \(name)…").foregroundStyle(.secondary)
+                    }
+                }
+            case .failed(let why):
+                Section {
+                    Label(why, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(PhoneTheme.failed)
+                        .font(.callout)
+                }
+            }
+            if let starters = project?.starters, !starters.isEmpty {
                 Section("Start with") {
-                    ForEach(project.starters, id: \.self) { starter in
+                    ForEach(starters, id: \.self) { starter in
                         Button(starter) { start(starter) }
                     }
                 }
             }
-            if !project.todos.isEmpty {
+            if let todos = project?.todos, !todos.isEmpty {
                 Section("From a To-do") {
-                    ForEach(project.todos, id: \.text) { todo in
+                    ForEach(todos, id: \.text) { todo in
                         Button { start(todo.prompt) } label: {
                             HStack(alignment: .firstTextBaseline) {
                                 Text(todo.text).foregroundStyle(.primary)
@@ -202,17 +249,45 @@ struct StartScreen: View {
                 }
             }
         }
-        .navigationTitle(project.name)
+        .disabled(phase == .starting)
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle(name)
+        .sensoryFeedback(.error, trigger: phase) { _, now in if case .failed = now { true } else { false } }
     }
 
+    /// Sends the start, then waits for the new session (and opens it) or the Mac's word on why it didn't start.
     private func start(_ prompt: String) {
-        Task { await store.ask(.start(folder: project.root, prompt: prompt), followUp: false) }
-        done()
-        // The new session shows up in Sessions once Claude starts
+        guard phase != .starting else { return }
+        phase = .starting
+        let before = Set(store.state.sessions.map(\.id))
+        let sentAt = Date()
         Task {
-            for wait in [3.0, 6.0] {
+            guard await store.send(.mac(.start(folder: root, prompt: prompt)), to: "") else {
+                phase = .failed(store.problem ?? "Couldn't send it to your Mac.")
+                return
+            }
+            for wait in [1.5, 1.5, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0] {
                 try? await Task.sleep(for: .seconds(wait))
                 await store.refresh()
+                // The new session is there: open it
+                if let new = store.state.sessions.first(where: { !before.contains($0.id) }) {
+                    done()
+                    store.tab = 0
+                    store.path = [new.id]
+                    return
+                }
+                // The Mac said it couldn't
+                if let note = store.extras?.note, note.at >= sentAt.addingTimeInterval(-5), note.text.hasPrefix("Couldn't") {
+                    phase = .failed(note.text)
+                    return
+                }
+            }
+            if let note = store.extras?.note, note.at >= sentAt.addingTimeInterval(-5), note.text.hasPrefix("Started") {
+                // Started, but Claude hasn't reported in yet: it shows in Sessions once it does
+                done()
+                store.tab = 0
+            } else {
+                phase = .failed("Your Mac didn't answer. It may be asleep, or WatchMan isn't open on it.")
             }
         }
     }

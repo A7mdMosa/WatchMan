@@ -110,8 +110,8 @@ targets:
       path: Sources/Phone/Info.plist
       properties:
         CFBundleDisplayName: WatchMan
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "4"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIApplicationSupportsIndirectInputEvents: YES
@@ -146,8 +146,8 @@ targets:
       path: Sources/PhoneQuestions/Info.plist
       properties:
         CFBundleDisplayName: WatchMan Questions
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "4"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.usernotifications.content-extension
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationViewController
@@ -176,8 +176,8 @@ targets:
       path: Sources/PhoneWidgets/Info.plist
       properties:
         CFBundleDisplayName: WatchMan
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "4"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
@@ -203,8 +203,8 @@ targets:
       path: Sources/PhoneAlerts/Info.plist
       properties:
         CFBundleDisplayName: WatchMan Alerts
-        CFBundleShortVersionString: "1.0.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "4"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.usernotifications.service
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService

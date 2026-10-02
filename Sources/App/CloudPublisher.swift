@@ -5,7 +5,9 @@ import WatchManCore
 
 /// WatchMan's side of the link to the iPhone: it keeps your private iCloud database up to date with every
 /// session (state, waiting prompt, recent chat) and your plan's usage, and carries out what you do on the phone.
-/// Writes follow the store's changes (a moment later, a few seconds apart at most); commands arrive by push.
+/// Writes follow the store's changes (a moment later, a few seconds apart at most). Commands arrive by push, but
+/// macOS delays or drops iCloud's silent pushes, so they're also read with each write and, while the phone is in
+/// use, every few seconds.
 @MainActor @Observable
 final class CloudPublisher {
     enum State: Equatable {
@@ -27,6 +29,10 @@ final class CloudPublisher {
     @ObservationIgnored private var lastPublish = Date.distantPast
     @ObservationIgnored private var changeToken: CKServerChangeToken?
     @ObservationIgnored private var fetchingCommands = false
+    /// When commands were last read, and when the phone last sent one (it's in use: read often).
+    @ObservationIgnored private var lastCommandFetch = Date.distantPast
+    @ObservationIgnored private var lastPhoneCommand = Date.distantPast
+    @ObservationIgnored private var commandPoll: Task<Void, Never>?
 
     static let minimumGap: TimeInterval = 3
     /// The running one, for Settings to show how the link is doing.
@@ -246,6 +252,8 @@ final class CloudPublisher {
         guard !saving.isEmpty || !deleting.isEmpty else { return }
         do {
             _ = try await database.modifyRecords(saving: saving, deleting: deleting, savePolicy: .allKeys, atomically: false)
+            // A write is a cheap moment to look for commands a push didn't bring
+            if Date().timeIntervalSince(lastCommandFetch) > Self.minimumGap { Task { await fetchCommands() } }
             sentSessions = current
             for id in gone { sentChats[id] = nil }
             sentStatus = status
@@ -290,10 +298,30 @@ final class CloudPublisher {
 
     // MARK: Commands from the phone
 
+    /// How often to read commands without waiting for a push: every few seconds while you're using the phone,
+    /// less often for half an hour after, then not at all (pushes, wakes and writes only).
+    private var pollInterval: TimeInterval? {
+        let since = Date().timeIntervalSince(lastPhoneCommand)
+        return since < 3 * 60 ? 3 : since < 30 * 60 ? 15 : nil
+    }
+
+    private func pollWhilePhoneInUse() {
+        guard commandPoll == nil else { return }
+        commandPoll = Task { [weak self] in
+            while let interval = self?.pollInterval {
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let self else { return }
+                if Date().timeIntervalSince(self.lastCommandFetch) >= interval - 0.5 { await self.fetchCommands() }
+            }
+            self?.commandPoll = nil
+        }
+    }
+
     /// Reads new commands (after a push, a wake, or at launch), carries out the fresh ones, deletes them all.
     func fetchCommands() async {
         guard case .on = state, !fetchingCommands else { return }
         fetchingCommands = true
+        lastCommandFetch = Date()
         defer { fetchingCommands = false }
         do {
             var done: [CKRecord.ID] = []
@@ -303,6 +331,8 @@ final class CloudPublisher {
                 for (id, result) in changes.modificationResultsByID {
                     guard case .success(let modification) = result, modification.record.recordType == CloudRecords.Kind.command else { continue }
                     if let command = CloudRecords.value(PhoneCommand.self, in: modification.record), !command.isStale() {
+                        lastPhoneCommand = Date()
+                        pollWhilePhoneInUse()
                         // Photos sent with a reply go in as file paths, the way the Mac's own attachments do
                         store.perform(PhoneControl.withPhotos(command, from: modification.record))
                     }
@@ -331,7 +361,10 @@ extension SessionStore {
             Log.info("phone: \(request)")
             return
         }
-        guard let session = sessions[id] else { return }
+        guard let session = sessions[id] else {
+            Log.info("phone: dropped \(command.kind) for a session the Mac doesn't have (\(id))")
+            return
+        }
         // The phone showed a prompt that has since been answered or replaced: never let it answer the next one
         if command.answersAnotherPrompt(than: session.pendingApproval?.requestedAt) {
             Log.info("phone: dropped \(command.kind) for an earlier prompt of \(session.label)")
