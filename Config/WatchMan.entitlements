@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Under the hardened runtime, AppleScript to Ghostty, iTerm2, Terminal and VS Code needs this -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<!-- The link to WatchMan for iPhone: your private iCloud database, and the push that wakes WatchMan when you
+	     answer from the phone -->
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.com.moussa.watchman</string>
+	</array>
+	<key>com.apple.developer.icloud-services</key>
+	<array>
+		<string>CloudKit</string>
+	</array>
+	<key>com.apple.developer.aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

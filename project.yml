@@ -1,0 +1,268 @@
+name: WatchMan
+options:
+  bundleIdPrefix: com.moussa
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    # Ahmed Moussa's team: scripts/install.sh and scripts/release.sh sign with its Developer ID
+    DEVELOPMENT_TEAM: ZMQ73447P3
+    ENABLE_HARDENED_RUNTIME: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  # Pure logic shared by the app, the hook and the tests
+  WatchManCore:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    platform: auto
+    sources:
+      - path: Sources/Core
+
+  # Tiny relay Claude Code runs for every hook event
+  watchman-hook:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Hook
+    dependencies:
+      - target: WatchManCore
+    settings:
+      base:
+        PRODUCT_NAME: watchman-hook
+        # It ships inside the app, so an archive holds only the app (and can be signed for distribution)
+        SKIP_INSTALL: YES
+      configs:
+        # Signed by Xcode with the team's certificate, so the app around it can be
+        Release:
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGN_IDENTITY: "Apple Development"
+          ENABLE_HARDENED_RUNTIME: YES
+
+  WatchMan:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/App
+      - path: Sources/Shared
+      - path: Resources/Assets.xcassets
+      - path: scripts/install-hooks.py
+        buildPhase: resources
+    dependencies:
+      - target: WatchManCore
+      - target: watchman-hook
+        link: false
+        embed: false
+    postBuildScripts:
+      - name: Embed watchman-hook
+        script: |
+          cp -f "${BUILT_PRODUCTS_DIR}/watchman-hook" "${TARGET_BUILD_DIR}/${EXECUTABLE_FOLDER_PATH}/watchman-hook"
+        inputFiles:
+          - $(BUILT_PRODUCTS_DIR)/watchman-hook
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_FOLDER_PATH)/watchman-hook
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleName: WatchMan
+        CFBundleDisplayName: WatchMan
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        LSUIElement: YES
+        NSHighResolutionCapable: YES
+        NSAppleEventsUsageDescription: "WatchMan controls your terminal to open a Claude session's tab and to type your replies into it."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.moussa.WatchMan
+        PRODUCT_NAME: WatchMan
+        ENABLE_APP_SANDBOX: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # The installed app: Apple-signed with iCloud and push (the link to the iPhone), hardened runtime.
+        # Debug builds stay ad-hoc, for tests and snapshots.
+        Release:
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGN_IDENTITY: "Apple Development"
+          CODE_SIGN_ENTITLEMENTS: Config/WatchMan.entitlements
+          ENABLE_HARDENED_RUNTIME: YES
+
+  # WatchMan for iPhone: the sessions, their prompts and chats, and the Overview, linked to the Mac
+  WatchManPhone:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/Phone
+      - path: Sources/Shared
+      - path: Sources/PhoneShared
+    dependencies:
+      - target: WatchManCore
+      - target: WatchManPhoneQuestions
+      - target: WatchManPhoneWidgets
+      - target: WatchManPhoneAlerts
+    info:
+      path: Sources/Phone/Info.plist
+      properties:
+        CFBundleDisplayName: WatchMan
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIApplicationSupportsIndirectInputEvents: YES
+        UIBackgroundModes: [remote-notification]
+        # The Live Activity on the lock screen and in the Dynamic Island
+        NSSupportsLiveActivities: true
+        # watchman://session/<id> from the widgets and the Live Activity
+        CFBundleURLTypes:
+          - CFBundleURLName: com.moussa.WatchMan.phone
+            CFBundleURLSchemes: [watchman]
+        # Only Apple's own encryption (iCloud, HTTPS): no export compliance questions on each upload
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Config/WatchManPhone.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: com.moussa.WatchMan.phone
+        PRODUCT_NAME: WatchMan
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  # A question notification's choices as its buttons (a notification content extension)
+  WatchManPhoneQuestions:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/PhoneQuestions
+    info:
+      path: Sources/PhoneQuestions/Info.plist
+      properties:
+        CFBundleDisplayName: WatchMan Questions
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.content-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationViewController
+          NSExtensionAttributes:
+            UNNotificationExtensionCategory: QUESTION
+            UNNotificationExtensionInitialContentSizeRatio: 0.35
+            UNNotificationExtensionDefaultContentHidden: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.moussa.WatchMan.phone.questions
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+  # The home screen and lock screen widgets, and the Live Activity
+  WatchManPhoneWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/PhoneWidgets
+      - path: Sources/PhoneShared
+    dependencies:
+      - target: WatchManCore
+    info:
+      path: Sources/PhoneWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: WatchMan
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.moussa.WatchMan.phone.widgets
+        CODE_SIGN_ENTITLEMENTS: Config/WatchManPhoneWidgets.entitlements
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+  # Shapes iCloud's alerts before they show: grouped per session, prompts Time Sensitive, the icon's count
+  WatchManPhoneAlerts:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/PhoneAlerts
+      - path: Sources/PhoneShared/GlanceStore.swift
+      - path: Sources/PhoneShared/AlertCategories.swift
+    dependencies:
+      - target: WatchManCore
+    info:
+      path: Sources/PhoneAlerts/Info.plist
+      properties:
+        CFBundleDisplayName: WatchMan Alerts
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.moussa.WatchMan.phone.alerts
+        CODE_SIGN_ENTITLEMENTS: Config/WatchManPhoneAlerts.entitlements
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+  # Renders the UI to PNGs with sample data, for design review without running the app
+  Snapshots:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Snapshots
+      - path: Sources/Shared
+      # The iPhone's widgets and Live Activity, to review their design
+      - path: Sources/PhoneWidgets/GlanceViews.swift
+      - path: Sources/PhoneShared/PhoneTheme.swift
+      - path: Sources/PhoneShared/Face.swift
+      - path: Sources/PhoneShared/LiveGlance.swift
+      - path: Sources/PhoneShared/GlanceStore.swift
+      - path: Sources/App
+        excludes:
+          - main.swift
+          - Info.plist
+    dependencies:
+      - target: WatchManCore
+
+  CoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/CoreTests
+        excludes:
+          - Fixtures
+      - path: Tests/CoreTests/Fixtures
+        buildPhase: resources
+        type: folder
+    dependencies:
+      - target: WatchManCore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  WatchManPhone:
+    build:
+      targets:
+        WatchManPhone: all
+  WatchMan:
+    build:
+      targets:
+        WatchMan: all
+        CoreTests: [test]
+    test:
+      targets:
+        - CoreTests

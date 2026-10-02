@@ -1,0 +1,3 @@
+/* iCloud fills these with an alert's title and words */
+"WM_TITLE" = "%@";
+"WM_BODY" = "%@";

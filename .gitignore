@@ -1,0 +1,22 @@
+build/
+build.noindex/
+*.xcodeproj/
+.DS_Store
+xcuserdata/
+dist/
+
+# Keys, certificates and profiles never go in the repo
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+*.provisionprofile
+AuthKey_*
+# Local, personal configuration
+*.local.xcconfig
+.env
+
+# Personal notes, prompts and mockups (kept on this Mac only)
+private/
+CLAUDE.md
+PLAN.md
